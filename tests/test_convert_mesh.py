@@ -111,7 +111,9 @@ def test_build_mesh_data() -> None:
     data = build_mesh_data(group, "content/tracks/t/materials/m.material").SerializeToString()
     mesh = _decode(".mesh", data)
     assert mesh.isVisible is True
-    assert mesh.lodOut == pytest.approx(250.0)
+    assert mesh.lodOut == pytest.approx(253.0)
+    assert mesh.irradianceVolumeGroundLevel is False
+    assert mesh.useFullPrecisionUvs is False
     lod = mesh.lods[0]
     assert len(lod.batches) == 1
     assert lod.batches[0].startIndex == 0
@@ -120,6 +122,8 @@ def test_build_mesh_data() -> None:
     assert lod.batches[0].material.startswith("content/tracks/t/materials/")
     assert mesh.boundsMin.x == pytest.approx(10.0)
     assert mesh.boundsMax.x == pytest.approx(13.0)
+    assert lod.colors and lod.colors[0] > 0.0
+    assert len(lod.tangents) == (len(lod.positions) // 3) * 4
 
 
 def test_build_mesh_data_empty_group() -> None:

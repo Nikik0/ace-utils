@@ -12,7 +12,9 @@ to BC1.
 
 from __future__ import annotations
 
+import os
 import struct
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -207,8 +209,46 @@ def _build_metadata(
 
 
 def convert_texture_file(path: str | Path, *, srgb: bool | None = None) -> AceTexture:
-    """Read an AC1 DDS file and convert it into an ACE texture asset."""
-    return convert_dds(read_dds(path), srgb=srgb)
+    """Read an AC1 DDS file and convert it into an ACE texture asset.
+
+    ACE ships BC1 (no-alpha colour), BC7 (alpha colour / normal) and BC4
+    (single channel) textures. AC1's DXT5 (BC3) is re-encoded to BC7 to match;
+    DXT1/BC1, BC4 and BC5 pass through unchanged. Resolution is preserved (no
+    downscale), matching the reference packages.
+    """
+    source = Path(path)
+    image = read_dds(source)
+    if srgb is None:
+        srgb = is_srgb_name(source.name)
+    if image.format == "BC3":
+        reencoded = _reencode_bc7(source, srgb=srgb)
+        if reencoded is not None:
+            image = reencoded
+    return convert_dds(image, srgb=srgb)
+
+
+def _reencode_bc7(source: Path, *, srgb: bool) -> Any:
+    """Re-encode a DDS (DXT5) as BC7 with texconv at the original resolution.
+
+    Returns None (keep BC3) when texconv is unavailable or fails.
+    """
+    from src.convert import texconv
+    from src.parser.dds import read_dds as _read
+
+    if texconv.find_texconv() is None:
+        return None
+    target = texconv.BC7_SRGB if srgb else texconv.BC7_LINEAR
+    try:
+        data = texconv.make_dds(source, target)
+    except Exception as exc:
+        logger.warning("texconv BC7 re-encode failed for {}: {}", source, exc)
+        return None
+    tmp = Path(tempfile.gettempdir()) / f"ace-bc7-{os.getpid()}-{source.stem}.dds"
+    tmp.write_bytes(data)
+    try:
+        return _read(tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def null_texture() -> AceTexture:

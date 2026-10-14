@@ -9,7 +9,9 @@ identity, matching the reference packages.
 
 from __future__ import annotations
 
+import math
 import re
+import struct
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, cast
@@ -38,6 +40,10 @@ MINIMAL_ATTRS = False
 # EvoForge classifies flat foliage/impostor meshes (>80 % of vertical area in two
 # of six orientation bins) and drops them, rebuilding vegetation as native assets.
 DROP_BILLBOARDS = True
+
+# EvoForge's default vertex-colour word (field 13), written as 4 x uint32 per
+# vertex. Reinterpreted as floats this is ~0.00392 (== 1/255).
+_COLOR_VALUE = struct.unpack("<f", struct.pack("<I", 0x3B808081))[0]
 
 
 def mat_mul(left: tuple[float, ...], right: tuple[float, ...]) -> tuple[float, ...]:
@@ -82,6 +88,50 @@ def _unit(
     return (x / length, y / length, z / length)
 
 
+def _weld_vectors(
+    arrays: list[tuple[list[float], list[float], list[float]]],
+    positions: list[float],
+    angle_deg: float = 45.0,
+) -> None:
+    """EvoForge's ``weldNormals``: smooth per-vertex vectors for vertices that
+    share a position (rounded to 0.0001) and point within ``angle_deg`` of each
+    other. Hard edges (larger angle) stay faceted."""
+    count = len(positions) // 3
+    if count <= 0:
+        return
+    cos_thresh = math.cos(angle_deg * math.pi / 180.0)
+    keys = [
+        (
+            round(positions[i * 3] * 10000),
+            round(positions[i * 3 + 1] * 10000),
+            round(positions[i * 3 + 2] * 10000),
+        )
+        for i in range(count)
+    ]
+    for ax, ay, az in arrays:
+        sums: dict[tuple[int, int, int], list[float]] = {}
+        for i in range(count):
+            total = sums.get(keys[i])
+            if total is None:
+                sums[keys[i]] = [ax[i], ay[i], az[i]]
+            else:
+                total[0] += ax[i]
+                total[1] += ay[i]
+                total[2] += az[i]
+        for i in range(count):
+            total = sums[keys[i]]
+            total_len = math.hypot(total[0], total[1], total[2])
+            own_len = math.hypot(ax[i], ay[i], az[i])
+            if total_len < 1e-12 or own_len < 1e-12:
+                continue
+            cosine = (
+                total[0] * ax[i] + total[1] * ay[i] + total[2] * az[i]
+            ) / (total_len * own_len)
+            if cosine < cos_thresh:
+                continue
+            ax[i], ay[i], az[i] = total[0], total[1], total[2]
+
+
 def recompute_normals_tangents(
     positions: list[float], uvs: list[float], indices: list[int]
 ) -> tuple[list[float], list[float]]:
@@ -97,6 +147,9 @@ def recompute_normals_tangents(
     txs = [0.0] * count
     tys = [0.0] * count
     tzs = [0.0] * count
+    bxs = [0.0] * count
+    bys = [0.0] * count
+    bzs = [0.0] * count
     for i in range(0, len(indices) - 2, 3):
         a, b, c = indices[i], indices[i + 1], indices[i + 2]
         ax, ay, az = positions[a * 3], positions[a * 3 + 1], positions[a * 3 + 2]
@@ -125,6 +178,16 @@ def recompute_normals_tangents(
             txs[v] += sx
             tys[v] += sy
             tzs[v] += sz
+        bx = (du1 * e2x - du2 * e1x) * r
+        by = (du1 * e2y - du2 * e1y) * r
+        bz = (du1 * e2z - du2 * e1z) * r
+        for v in (a, b, c):
+            bxs[v] += bx
+            bys[v] += by
+            bzs[v] += bz
+
+    _weld_vectors([(nxs, nys, nzs), (txs, tys, tzs), (bxs, bys, bzs)], positions)
+
     normals: list[float] = []
     tangents: list[float] = []
     for v in range(count):
@@ -132,8 +195,12 @@ def recompute_normals_tangents(
         dot = txs[v] * nx + tys[v] * ny + tzs[v] * nz
         ox, oy, oz = txs[v] - nx * dot, tys[v] - ny * dot, tzs[v] - nz * dot
         tx, ty, tz = _unit(ox, oy, oz, (1.0, 0.0, 0.0) if abs(nx) < 0.9 else (0.0, 1.0, 0.0))
+        cx = ny * tz - nz * ty
+        cy = nz * tx - nx * tz
+        cz = nx * ty - ny * tx
+        w = -1.0 if (cx * bxs[v] + cy * bys[v] + cz * bzs[v]) < 0.0 else 1.0
         normals.extend((nx, ny, nz))
-        tangents.extend((tx, ty, tz, 1.0))
+        tangents.extend((tx, ty, tz, w))
     return normals, tangents
 
 
@@ -396,8 +463,44 @@ def tile_groups(groups: list[GroupedMesh], cell_size: float) -> list[GroupedMesh
     return out
 
 
+def _lod_out(
+    bounds_min: tuple[float, float, float],
+    bounds_max: tuple[float, float, float],
+    *,
+    cull_height: float = 0.0,
+) -> float:
+    """Port of EvoForge's ``Ib``: derive the LOD-out distance from the mesh bounds."""
+    def span(axis: int) -> float:
+        value = bounds_max[axis] - bounds_min[axis]
+        return value if math.isfinite(value) and value > 0.0 else 0.0
+
+    z = cull_height if cull_height > 0.0 else span(1)
+    h = max(span(0), span(2))
+    k = min(2000.0, round(min(h * 1.5, h + 250.0)))
+    if z >= 8.0:
+        return max(min(2500.0, max(800.0, round(z * 25.0))), k)
+    if h < 150.0:
+        return min(400.0, 250.0 + round(h))
+    return max(250.0, k)
+
+
+def _has_large_uvs(group: GroupedMesh) -> bool:
+    """EvoForge sets ``fullPrecisionUvs`` when any UV coordinate exceeds +-8."""
+    for part in group.parts:
+        for vertex in part.vertices:
+            u, v = vertex.uv
+            if u > 8.0 or u < -8.0 or v > 8.0 or v < -8.0:
+                return True
+    return False
+
+
 def build_mesh_data(
-    group: GroupedMesh, material_path: str, *, uv_scale: tuple[float, float] = (1.0, 1.0)
+    group: GroupedMesh,
+    material_path: str,
+    *,
+    uv_scale: tuple[float, float] = (1.0, 1.0),
+    ground_level: bool = False,
+    full_precision_uvs: bool = False,
 ) -> Message:
     """Serialize a material group as a ``MeshData`` message.
 
@@ -410,8 +513,8 @@ def build_mesh_data(
     msg = cast(Any, new_message(".mesh"))
     msg.isVisible = True
     msg.isRenderable = True
-    msg.useFullPrecisionUvs = True
-    msg.lodOut = group.lod_out if group.lod_out > 0 else 1000.0
+    msg.irradianceVolumeGroundLevel = ground_level
+    msg.useFullPrecisionUvs = full_precision_uvs
 
     lod = msg.lods.add()
 
@@ -453,7 +556,7 @@ def build_mesh_data(
         normals, tangents = recompute_normals_tangents(positions, uvs, list(lod.indices))
         lod.normals.extend(normals)
         lod.tangents.extend(tangents)
-        lod.colors.extend([0.0] * (vertex_count * 4))
+        lod.colors.extend([_COLOR_VALUE] * (vertex_count * 4))
         lod.texcoords1.extend([0.0] * (vertex_count * 2))
         lod.texcoords2.extend([0.0] * (vertex_count * 2))
         lod.texcoords3.extend([0.0] * (vertex_count * 2))
@@ -471,6 +574,7 @@ def build_mesh_data(
         min_z, max_z = min(zs), max(zs)
         msg.boundsMin.x, msg.boundsMin.y, msg.boundsMin.z = min_x, min_y, min_z
         msg.boundsMax.x, msg.boundsMax.y, msg.boundsMax.z = max_x, max_y, max_z
+        msg.lodOut = _lod_out((min_x, min_y, min_z), (max_x, max_y, max_z))
         lod.boundsMin.x, lod.boundsMin.y, lod.boundsMin.z = min_x, min_y, min_z
         lod.boundsMax.x, lod.boundsMax.y, lod.boundsMax.z = max_x, max_y, max_z
 

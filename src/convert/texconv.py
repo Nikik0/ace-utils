@@ -70,11 +70,9 @@ def make_dds(image_path: str | Path, format_name: str, *, mip_count: int = 0) ->
 
     work = _stage_dir()
     suffix = Path(image_path).suffix or ".png"
-    staged = work / f"src{suffix}"
+    staged = work / f"in{suffix}"
     shutil.copyfile(image_path, staged)
-    output = work / "src.dds"
-    if output.exists():
-        output.unlink()
+    output = work / "in.dds"
 
     args = [str(texconv.resolve()), "-f", format_name, "-y", "-o", _windows_path(work)]
     args += ["-m", str(mip_count)] if mip_count else []

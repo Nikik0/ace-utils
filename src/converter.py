@@ -31,6 +31,7 @@ from src.convert.material import build_material_data, dds_texture_name, material
 from src.convert.mesh import (
     GroupedMesh,
     WorldMesh,
+    _has_large_uvs,
     build_mesh_data,
     group_by_material,
     iter_world_meshes,
@@ -47,6 +48,7 @@ from src.convert.spawn import spawn_scenes
 from src.convert.surfaces import build_surfaces_scene
 from src.convert.texture import (
     AceTexture,
+    convert_texture_file,
     is_srgb_name,
     null_texture,
     solid_texture,
@@ -57,6 +59,8 @@ from src.packer.install import default_mods_dir, install_kspkg
 from src.packer.kspkg import KspkgWriter
 from src.parser.ac1 import AcLayout, AcTrack, parse_track
 from src.parser.kn5_model import Kn5Material, Kn5Model
+
+_WALL_RE = re.compile(r"WALL|FENCE|RAIL|BARRIER", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +222,7 @@ class TrackConverter:
         for name in sorted(referenced):
             source = sources.get(name.lower())
             if source is not None:
-                texture = texture_from_image_file(source, max_size=1024, srgb=is_srgb_name(name))
+                texture = convert_texture_file(source, srgb=is_srgb_name(name))
             else:
                 texture = fallback
             self._write_texture(build_dir, track_id, name, texture)
@@ -269,9 +273,6 @@ class TrackConverter:
                     mapping.material_path(track_id, mapping.sanitize_name(group.material))
                 )
                 mesh_path = mapping.mesh_path(track_id, group.name)
-                mesh_message = build_mesh_data(group, material_path, uv_scale=uv_scale)
-                self._write_bytes(build_dir, mesh_path, mesh_message.SerializeToString())
-                bounds = _group_bounds(group)
                 upper = group.material.upper()
                 surface = next(
                     (
@@ -281,6 +282,17 @@ class TrackConverter:
                     ),
                     "",
                 )
+                ground_level = bool(surface) and not _WALL_RE.search(surface)
+                full_precision_uvs = ground_level or _has_large_uvs(group)
+                mesh_message = build_mesh_data(
+                    group,
+                    material_path,
+                    uv_scale=uv_scale,
+                    ground_level=ground_level,
+                    full_precision_uvs=full_precision_uvs,
+                )
+                self._write_bytes(build_dir, mesh_path, mesh_message.SerializeToString())
+                bounds = _group_bounds(group)
                 entries.append(
                     StaticMeshEntry(
                         name=group.name,
