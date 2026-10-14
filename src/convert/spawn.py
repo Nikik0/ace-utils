@@ -70,6 +70,7 @@ def build_spawn_scene(
     type_code: int,
     name_prefix: str,
     slot_start: int = 0,
+    lift: float = 0.0,
 ) -> Message:
     """Build a ``SceneData`` of starting positions from markers."""
     scene = cast(Any, new_message(".scene"))
@@ -80,7 +81,7 @@ def build_spawn_scene(
         actor.enabled = True
         actor.tags.extend(START_TAGS)
         actor.transform.position.x = marker.position[0]
-        actor.transform.position.y = marker.position[1]
+        actor.transform.position.y = marker.position[1] + lift
         actor.transform.position.z = marker.position[2]
         actor.transform.rotation.y = marker.yaw_degrees
         actor.transform.scale.x = 1.0
@@ -96,19 +97,26 @@ def build_spawn_scene(
     return cast(Message, scene)
 
 
-def spawn_scenes(model: Kn5Model) -> dict[str, Message]:
+def spawn_scenes(model: Kn5Model, *, lift: float = 0.0) -> dict[str, Message]:
     """Build the grid/pitlane/hotlap scenes for one KN5 model."""
     markers = collect_markers(model)
     return {
         "grid": build_spawn_scene(
-            select_markers(markers, "AC_START_"), type_code=TYPE_GRID, name_prefix="starting_grid"
+            select_markers(markers, "AC_START_"),
+            type_code=TYPE_GRID,
+            name_prefix="starting_grid",
+            lift=lift,
         ),
         "pitlane": build_spawn_scene(
-            select_markers(markers, "AC_PIT_"), type_code=TYPE_PIT, name_prefix="pit_spawn"
+            select_markers(markers, "AC_PIT_"),
+            type_code=TYPE_PIT,
+            name_prefix="pit_spawn",
+            lift=lift,
         ),
         "hotlap": build_spawn_scene(
             select_markers(markers, "AC_HOTLAP_START_"),
             type_code=TYPE_HOTLAP,
             name_prefix="starting_position_hotlap",
+            lift=lift,
         ),
     }

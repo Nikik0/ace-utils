@@ -113,11 +113,11 @@ def test_build_mesh_data() -> None:
     assert mesh.isVisible is True
     assert mesh.lodOut == pytest.approx(250.0)
     lod = mesh.lods[0]
-    assert len(lod.batches) == 2
-    assert lod.batches[0].indexCount == 3
-    assert lod.batches[1].startIndex == 3
+    assert len(lod.batches) == 1
+    assert lod.batches[0].startIndex == 0
+    assert lod.batches[0].indexCount == 6
     assert list(lod.indices) == [0, 1, 2, 3, 4, 5]
-    assert lod.batches[1].material.startswith("content/tracks/t/materials/")
+    assert lod.batches[0].material.startswith("content/tracks/t/materials/")
     assert mesh.boundsMin.x == pytest.approx(10.0)
     assert mesh.boundsMax.x == pytest.approx(13.0)
 

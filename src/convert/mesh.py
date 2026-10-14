@@ -217,8 +217,11 @@ def _billboard_ratio(vertices: tuple[Kn5Vertex, ...], indices: tuple[int, ...]) 
     return (top[0] + top[1]) / vertical
 
 
-def iter_world_meshes(model: Kn5Model) -> list[WorldMesh]:
-    """Bake every mesh node of a KN5 model into world space."""
+def iter_world_meshes(model: Kn5Model, *, lift: float = 0.0) -> list[WorldMesh]:
+    """Bake every mesh node of a KN5 model into world space.
+
+    ``lift`` raises every vertex along Y (EvoForge's ``track/altitude`` step).
+    """
     result: list[WorldMesh] = []
 
     def walk(node: Kn5Node, parent: tuple[float, ...]) -> None:
@@ -228,14 +231,23 @@ def iter_world_meshes(model: Kn5Model) -> list[WorldMesh]:
             else parent
         )
         if node.is_mesh and not _BILLBOARD.search(node.name):
-            vertices = tuple(
-                Kn5Vertex(
-                    position=transform_point(world, vertex.position),
-                    normal=transform_normal(world, vertex.normal),
-                    uv=vertex.uv,
-                    tangent=vertex.tangent,
+            baked = [
+                (
+                    transform_point(world, vertex.position),
+                    transform_normal(world, vertex.normal),
+                    vertex.uv,
+                    vertex.tangent,
                 )
                 for vertex in node.vertices
+            ]
+            vertices = tuple(
+                Kn5Vertex(
+                    position=(position[0], position[1] + lift, position[2]),
+                    normal=normal,
+                    uv=uv,
+                    tangent=tangent,
+                )
+                for position, normal, uv, tangent in baked
             )
             material = _material_name(model, node.material_id)
             foliage = bool(_FOLIAGE.search(node.name) or _FOLIAGE.search(material))
@@ -398,20 +410,18 @@ def build_mesh_data(
     msg = cast(Any, new_message(".mesh"))
     msg.isVisible = True
     msg.isRenderable = True
-    msg.useFullPrecisionUvs = False
+    msg.useFullPrecisionUvs = True
     msg.lodOut = group.lod_out if group.lod_out > 0 else 1000.0
 
     lod = msg.lods.add()
 
+    batch = lod.batches.add()
+    batch.name = group.name
+    batch.material = material_path
+
     weld: dict[tuple[Any, ...], int] = {}
     emitted: list[Kn5Vertex] = []
     for part in group.parts:
-        batch = lod.batches.add()
-        batch.name = part.name
-        batch.startIndex = len(lod.indices)
-        batch.indexCount = len(part.indices)
-        batch.material = material_path
-
         local: list[int] = []
         for vertex in part.vertices:
             key = (vertex.position, vertex.normal, vertex.uv, vertex.tangent)
@@ -428,6 +438,8 @@ def build_mesh_data(
                 lod.indices.extend((local[a], local[c], local[b]))
         else:
             lod.indices.extend(local[index] for index in part.indices)
+
+    batch.indexCount = len(lod.indices)
 
     positions: list[float] = []
     uvs: list[float] = []

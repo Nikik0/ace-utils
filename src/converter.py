@@ -121,7 +121,10 @@ class TrackConverter:
         self._write_textures(build_dir, track, track_id, materials)
         self._write_materials(build_dir, track_id, materials)
         surface_keys = {s.key.upper() for s in ac_layout.surfaces}
-        self._write_meshes(build_dir, track_id, models, entries, surface_keys, self.uv_scale)
+        lift = _compute_lift(models, surface_keys)
+        if lift:
+            logger.info("track/altitude: raising track by {:.1f} m", lift)
+        self._write_meshes(build_dir, track_id, models, entries, surface_keys, lift, self.uv_scale)
 
         near_entries = [e for e in entries if e.surface_id]
         far_entries = [e for e in entries if not e.surface_id]
@@ -147,7 +150,7 @@ class TrackConverter:
             mapping.layout_container_scene(track_id, layout),
             layout_scene.SerializeToString(),
         )
-        spawn_containers = self._write_spawns(build_dir, track_id, models)
+        spawn_containers = self._write_spawns(build_dir, track_id, models, lift)
         has_timelines = self._write_timelines(build_dir, track_id, layout, models)
         self._write_root_scene(
             build_dir,
@@ -250,11 +253,12 @@ class TrackConverter:
         models: list[tuple[str, Kn5Model]],
         entries: list[StaticMeshEntry],
         surface_keys: set[str],
+        lift: float = 0.0,
         uv_scale: tuple[float, float] = (1.0, 1.0),
     ) -> None:
         for filename, model in models:
             physics_only = "collision" in filename.lower()
-            world = iter_world_meshes(model)
+            world = iter_world_meshes(model, lift=lift)
             cell = max(32.0, _world_span(world) / 8.0)
             for group in split_groups(tile_groups(group_by_material(world), cell)):
                 if self.exclude_materials and re.search(
@@ -399,11 +403,15 @@ class TrackConverter:
         container.actor.container.loaded_on_demand = on_demand
 
     def _write_spawns(
-        self, build_dir: Path, track_id: str, models: list[tuple[str, Kn5Model]]
+        self,
+        build_dir: Path,
+        track_id: str,
+        models: list[tuple[str, Kn5Model]],
+        lift: float = 0.0,
     ) -> list[str]:
         written: list[str] = []
         for _, model in models:
-            for name, scene in spawn_scenes(model).items():
+            for name, scene in spawn_scenes(model, lift=lift).items():
                 if not cast(Any, scene).scene_actors:
                     continue
                 short = f"spawnpoints_{name}"
@@ -530,6 +538,36 @@ def _group_bounds(group: GroupedMesh) -> tuple[float, float, float, float, float
     if not xs:
         return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     return (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+
+
+def _compute_lift(
+    models: list[tuple[str, Kn5Model]], surface_keys: set[str]
+) -> float:
+    """EvoForge ``track/altitude``: raise the track so its lowest drivable surface
+    sits at Y=0. Drivable = material matching a surface key, excluding walls/rails."""
+    if not surface_keys:
+        return 0.0
+    wall = re.compile(r"WALL|BARRIER|FENCE|RAIL|GUARD", re.IGNORECASE)
+    lowest = float("inf")
+    for _, model in models:
+        for mesh in iter_world_meshes(model):
+            upper = mesh.material.upper()
+            surface = next(
+                (
+                    key
+                    for key in sorted(surface_keys, key=len, reverse=True)
+                    if upper == key or upper.startswith(f"{key} ")
+                ),
+                "",
+            )
+            if not surface or wall.search(surface):
+                continue
+            for vertex in mesh.vertices:
+                if vertex.position[1] < lowest:
+                    lowest = vertex.position[1]
+    if lowest != float("inf") and lowest < -0.05:
+        return -lowest
+    return 0.0
 
 
 def _world_span(meshes: list[WorldMesh]) -> float:
